@@ -1,0 +1,297 @@
+<template>
+  <div class="change-review-page">
+    <el-card class="main-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+           <div class="header-left">
+             <span class="header-title">项目变更审核</span>
+             <el-tag type="info" size="small" effect="plain" round class="ml-2">共 {{ total }} 项</el-tag>
+           </div>
+        </div>
+      </template>
+
+      <div class="filter-section mb-4">
+        <el-form :inline="true" class="filter-form">
+          <el-form-item label="变更类型">
+             <el-select v-model="filters.requestType" placeholder="全部类型" clearable style="width: 150px">
+                <el-option label="全部" value="" />
+                <el-option label="项目变更" value="CHANGE" />
+             </el-select>
+          </el-form-item>
+           <el-form-item label="项目名称">
+            <el-input
+              v-model="filters.search"
+              placeholder="搜索项目名称"
+              style="width: 200px"
+              clearable
+              @keyup.enter="handleSearch"
+            >
+               <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="handleSearch">查询</el-button>
+            <el-button @click="resetFilters">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <el-table
+        v-loading="loading"
+        :data="changeRequests"
+        style="width: 100%"
+        border
+        stripe
+      >
+        <el-table-column type="index" label="序号" width="60" align="center" />
+        <el-table-column
+          prop="project_title"
+          label="项目名称"
+          min-width="200"
+          show-overflow-tooltip
+        >
+             <template #default="{ row }">
+                 <div class="font-medium">{{ row.project_title }}</div>
+                 <div class="text-xs text-gray-500">项目编号: {{ row.project_no || '-' }}</div>
+             </template>
+        </el-table-column>
+        <el-table-column prop="request_type_display" label="变更类型" width="120" align="center">
+          <template #default="{ row }">
+            <el-tag>{{ row.request_type_display }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="申请时间" width="160" align="center">
+             <template #default="{ row }">
+                 {{ formatDate(row.created_at) }}
+             </template>
+        </el-table-column>
+        <el-table-column prop="status_display" label="状态" width="120" align="center">
+           <template #default="{ row }">
+               <el-tag :type="getStatusType(row.status)">{{ row.status_display }}</el-tag>
+           </template>
+        </el-table-column>
+        
+        <el-table-column label="操作" width="180" align="center" fixed="right">
+          <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="handleReview(row)">审核</el-button>
+              <el-button v-if="row.attachment_url" link type="primary" size="small" @click="openAttachment(row.attachment_url)">附件</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="pagination-container mt-4">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50]"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="handleSizeChange"
+          @current-change="handlePageChange"
+        />
+      </div>
+    </el-card>
+
+    <el-dialog v-model="dialogVisible" title="审核意见" width="480px">
+      <el-form label-width="90px">
+        <el-form-item label="审核意见">
+          <el-input v-model="comments" type="textarea" :rows="4" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="danger" :loading="reviewing" @click="submitReview('reject')">驳回</el-button>
+          <el-button type="primary" :loading="reviewing" @click="submitReview('approve')">通过</el-button>
+        </span>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { ElMessage } from "element-plus";
+import { Search } from "@element-plus/icons-vue";
+import { getChangeRequests, reviewChangeRequest } from "@/api/projects/change-requests";
+import dayjs from "dayjs";
+
+defineOptions({ name: "Level1ChangeReviewsView" });
+
+type ChangeRequestRow = {
+  id: number;
+  project_title?: string;
+  project_no?: string;
+  request_type_display?: string;
+  created_at?: string;
+  status?: string;
+  status_display?: string;
+  attachment_url?: string;
+};
+
+type ChangeRequestListResponse = {
+  data?: {
+    results?: ChangeRequestRow[];
+    total?: number;
+  } | ChangeRequestRow[];
+  results?: ChangeRequestRow[];
+  count?: number;
+  total?: number;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (!isRecord(error)) return fallback;
+  const response = error.response;
+  if (isRecord(response) && isRecord(response.data) && typeof response.data.message === "string") {
+    return response.data.message;
+  }
+  if (typeof error.message === "string") return error.message;
+  return fallback;
+};
+
+const loading = ref(false);
+const reviewing = ref(false);
+const changeRequests = ref<ChangeRequestRow[]>([]);
+const total = ref(0);
+const currentPage = ref(1);
+const pageSize = ref(10);
+const dialogVisible = ref(false);
+const currentId = ref<number | null>(null);
+const comments = ref("");
+
+const filters = ref({
+  requestType: "",
+  search: "",
+});
+
+const fetchRequests = async () => {
+  loading.value = true;
+  try {
+    const params: Record<string, string | number> = {
+      page: currentPage.value,
+      page_size: pageSize.value,
+      status: "LEVEL1_REVIEWING", // Only show pending reviews
+    };
+    if (filters.value.requestType) params.request_type = filters.value.requestType;
+    if (filters.value.search) params.search = filters.value.search;
+
+    const res = (await getChangeRequests(params)) as
+      | ChangeRequestListResponse
+      | ChangeRequestRow[];
+    if (Array.isArray(res)) {
+      changeRequests.value = res;
+      total.value = res.length;
+      return;
+    }
+    if (isRecord(res) && Array.isArray(res.results)) {
+      changeRequests.value = res.results;
+      total.value =
+        typeof res.count === "number"
+          ? res.count
+          : typeof res.total === "number"
+            ? res.total
+            : res.results.length;
+      return;
+    }
+    if (isRecord(res) && isRecord(res.data) && Array.isArray(res.data.results)) {
+      changeRequests.value = res.data.results ?? [];
+      total.value =
+        typeof res.data.total === "number"
+          ? res.data.total
+          : changeRequests.value.length;
+      return;
+    }
+    if (isRecord(res) && Array.isArray(res.data)) {
+      changeRequests.value = res.data as ChangeRequestRow[];
+      total.value = changeRequests.value.length;
+      return;
+    }
+    changeRequests.value = [];
+    total.value = 0;
+  } catch (error) {
+    console.error(error);
+    ElMessage.error("获取数据失败");
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleSearch = () => {
+  currentPage.value = 1;
+  fetchRequests();
+};
+
+const resetFilters = () => {
+  filters.value.requestType = "";
+  filters.value.search = "";
+  handleSearch();
+};
+
+const handleSizeChange = (val: number) => {
+  pageSize.value = val;
+  fetchRequests();
+};
+
+const handlePageChange = (val: number) => {
+  currentPage.value = val;
+  fetchRequests();
+};
+
+const handleReview = (row: ChangeRequestRow) => {
+  currentId.value = row.id;
+  comments.value = "";
+  dialogVisible.value = true;
+};
+
+const submitReview = async (action: "approve" | "reject") => {
+  if (!currentId.value) return;
+  reviewing.value = true;
+  try {
+    await reviewChangeRequest(currentId.value, { action, comments: comments.value });
+    ElMessage.success("审核完成");
+    dialogVisible.value = false;
+    fetchRequests();
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, "操作失败"));
+  } finally {
+    reviewing.value = false;
+  }
+};
+
+const openAttachment = (url: string) => {
+  window.open(url, "_blank");
+};
+
+const formatDate = (date: string) => {
+  if (!date) return "-";
+  return dayjs(date).format("YYYY-MM-DD HH:mm");
+};
+
+const getStatusType = (status: string) => {
+  if (status === "APPROVED") return "success";
+  if (status === "REJECTED") return "danger";
+  return "warning";
+};
+
+onMounted(() => {
+  fetchRequests();
+});
+</script>
+
+<style scoped>
+.change-review-page {
+  padding: 20px;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.title {
+  font-size: 16px;
+  font-weight: 600;
+}
+</style>
