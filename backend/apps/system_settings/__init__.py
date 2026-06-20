@@ -1,3 +1,0 @@
-"""
-System settings app.
-"""
